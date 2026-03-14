@@ -110,9 +110,8 @@ The naive approach — running `SELECT COUNT(*), percentile_disc(0.99) …` over
 ```
 Raw event tables                 Materialised aggregates
 ─────────────────                ───────────────────────
-error_occurrences                error_groups.occurrence_count  ← maintained on every insert (trigger/upsert)
+error_occurrences                error_groups.occurrence_count  ← maintained on every insert (upsert in queue drainer)
 traces                    →      perf_aggregates_hourly         ← pg_cron refresh every 5 min
-session_events                   session_aggregates_daily       ← pg_cron refresh every hour
 ```
 
 #### Layer 1: Running counters in parent rows
@@ -130,12 +129,13 @@ The `user_count` sub-select is bounded by the group size. For very active groups
 
 #### Layer 2: Pre-aggregated time-series buckets
 
-`perf_aggregates_hourly` is the source of truth for all performance charts. A pg_cron job upserts one row per `(org_id, project_id, operation, hour)` every 5 minutes using `percentile_disc` over raw traces within that hour:
+`perf_aggregates_hourly` is the source of truth for all performance charts. A pg_cron job upserts one row per `(org_id, operation, hour)` every 5 minutes using `percentile_disc` over raw traces within that hour:
 
 ```sql
-INSERT INTO perf_aggregates_hourly (org_id, project_id, operation, hour, p50, p90, p99, count, total_ms)
+INSERT INTO perf_aggregates_hourly (org_id, operation, hour, p50, p90, p99, sample_count, total_ms)
 SELECT
-    org_id, project_id, operation,
+    org_id,
+    operation,
     date_trunc('hour', started_at) AS hour,
     percentile_disc(0.50) WITHIN GROUP (ORDER BY duration_ms),
     percentile_disc(0.90) WITHIN GROUP (ORDER BY duration_ms),
@@ -145,16 +145,16 @@ SELECT
   FROM traces
  WHERE started_at >= date_trunc('hour', now() - interval '1 hour')
    AND started_at <  date_trunc('hour', now())
-GROUP BY org_id, project_id, operation, date_trunc('hour', started_at)
-ON CONFLICT (org_id, project_id, operation, hour) DO UPDATE SET
-    p50      = EXCLUDED.p50,
-    p90      = EXCLUDED.p90,
-    p99      = EXCLUDED.p99,
-    count    = EXCLUDED.count,
-    total_ms = EXCLUDED.total_ms;
+GROUP BY org_id, operation, date_trunc('hour', started_at)
+ON CONFLICT (org_id, operation, hour) DO UPDATE SET
+    p50          = EXCLUDED.p50,
+    p90          = EXCLUDED.p90,
+    p99          = EXCLUDED.p99,
+    sample_count = EXCLUDED.sample_count,
+    total_ms     = EXCLUDED.total_ms;
 ```
 
-Dashboard latency trend queries touch only `perf_aggregates_hourly` — a tiny table regardless of trace volume.
+Dashboard latency trend queries touch only `perf_aggregates_hourly` — a small table regardless of trace volume. The `sample_count` and `total_ms` columns are stored alongside percentiles so average latency can be computed cheaply at read time without touching raw traces.
 
 #### Layer 3: Indexes tuned for access patterns
 
@@ -163,7 +163,7 @@ Dashboard latency trend queries touch only `perf_aggregates_hourly` — a tiny t
 | `error_occurrences` | B-tree `(org_id, group_id, occurred_at DESC)` | Paginate occurrences per group |
 | `error_occurrences` | B-tree `(org_id, occurred_at DESC)` | Recent errors across org |
 | `traces` | B-tree `(org_id, operation, started_at DESC)` | Slowest traces per operation |
-| `traces` | BRIN `(started_at)` | Range scans on append-only time column (compact) |
+| `traces` | B-tree `(org_id, started_at DESC)` | Time-range scans across all operations |
 | `session_events` | B-tree `(org_id, session_id, occurred_at)` | Timeline reconstruction |
 | `perf_aggregates_hourly` | B-tree `(org_id, operation, hour DESC)` | Trend queries |
 
@@ -173,7 +173,7 @@ Dashboard latency trend queries touch only `perf_aggregates_hourly` — a tiny t
 - **Declarative range partitioning** on `occurred_at` (monthly): each partition is a separate heap file. `error_occurrences_2026_03` is pruned automatically from queries targeting other months. Index scans stay in the current partition.
 - **`SKIP LOCKED`** in the queue drainer: allows multiple drainer processes to run concurrently without blocking each other on the same queue rows.
 - **`ON CONFLICT DO NOTHING / DO UPDATE`**: atomic upserts for idempotency and aggregate maintenance without application-level locking.
-- **BRIN indexes**: 8× smaller than B-tree for naturally-ordered large tables; good for `WHERE started_at BETWEEN …` with sequential inserts.
+- **Partial indexes**: e.g. `WHERE attempts < 5` on `ingestion_queue` keeps the hot-path index small; `WHERE resolved_at IS NULL` on `alerts` covers the active-alert query with a minimal index.
 
 #### What breaks first when volume doubles?
 
@@ -478,8 +478,8 @@ When an `identify()` event arrives with `{anonymous_id, user_id}`:
 2. `UPDATE sessions SET user_id = $user_id WHERE org_id = $org_id AND anonymous_id = $anonymous_id AND user_id IS NULL`.
 3. This retroactively attributes all prior sessions on this device to the identified user.
 
-**Phase 2: Retroactive (batch)**  
-A pg_cron job (nightly) scans `identity_map` for `anonymous_id`s that have `user_id` but where the corresponding `sessions` rows still have `user_id IS NULL`. This catches cases where the `identify()` event was processed before the session rows had been drained from `ingestion_queue`.
+**Phase 2: Retroactive (inline)**  
+Within the queue drainer, when an `identify` event is processed, an `UPDATE sessions SET user_id = $user_id WHERE org_id = $org_id AND anonymous_id = $anonymous_id AND user_id IS NULL` runs immediately after the `identity_map` upsert. This retroactively attributes all prior sessions on the same device to the identified user within the same drainer tick.
 
 ### Funnel Analysis
 
@@ -524,7 +524,7 @@ Funnel steps are defined as event name sequences. No time-between-steps constrai
 
 Traces follow the OpenTelemetry span model: each span has a `trace_id` (groups all spans for one request), a `span_id` (unique to this span), and an optional `parent_span_id` (for nested spans). The ingestion API accepts spans individually or as a batch.
 
-For the MVP, only root spans (those with no `parent_span_id`, or those explicitly tagged as the root) are included in latency distribution calculations. Child spans are stored and displayed on individual trace detail views.
+**For the MVP, all ingested spans** are included in latency distribution calculations. The `perf_aggregates_hourly` aggregation groups by `operation` name, so callers should use consistent, meaningful operation names (e.g. `db.query.getUser`, `http.GET /api/products`) to get useful per-operation metrics.
 
 ### Percentile Query Strategy
 
@@ -579,10 +579,12 @@ A single algorithm (e.g., "alert if current value > N × average") handles the s
 
 ```sql
 -- Run every 5 minutes via pg_cron
+-- Note: date_trunc does not accept interval strings; 5-min buckets use modulo arithmetic:
 WITH buckets AS (
     SELECT
         org_id,
-        date_trunc('5 minutes', occurred_at) AS bucket,
+        date_trunc('minute', occurred_at)
+            - (EXTRACT(MINUTE FROM occurred_at)::int % 5) * interval '1 minute' AS bucket,
         count(*) AS cnt
     FROM error_occurrences
     WHERE occurred_at >= now() - interval '65 minutes'
@@ -593,10 +595,14 @@ stats AS (
         org_id,
         avg(cnt) AS mean,
         stddev_pop(cnt) AS stddev,
-        max(bucket) AS latest_bucket,
-        max(cnt) FILTER (WHERE bucket = date_trunc('5 minutes', now() - interval '5 minutes')) AS current_cnt
+        max(cnt) FILTER (
+            WHERE bucket = date_trunc('minute', now() - interval '5 minutes')
+                - (EXTRACT(MINUTE FROM (now() - interval '5 minutes'))::int % 5)
+                * interval '1 minute'
+        ) AS current_cnt
     FROM buckets
-    WHERE bucket < date_trunc('5 minutes', now())  -- exclude in-progress bucket
+    WHERE bucket < date_trunc('minute', now())
+              - (EXTRACT(MINUTE FROM now())::int % 5) * interval '1 minute'
     GROUP BY org_id
 )
 INSERT INTO alerts (org_id, type, metric_value, baseline_value, deviation_percent, duration_minutes, started_at)
@@ -613,7 +619,7 @@ WHERE current_cnt > mean + (3 * stddev)
   AND current_cnt > 10              -- suppress 0→2 events triggering 3σ
   AND stddev > 0                    -- need meaningful variance
   AND mean IS NOT NULL
-ON CONFLICT DO NOTHING;
+  AND current_cnt IS NOT NULL;
 ```
 
 **Minimum data required**: 12 buckets = 60 minutes of traffic with at least some errors. During ramp-up, no alerts fire.
@@ -875,6 +881,8 @@ perf_aggregates_hourly  (org_id, operation, hour, p50, p90, p99, count, total_ms
 ```sql
 alerts             (id, org_id, type, metric_value, baseline_value, deviation_percent,
                     duration_minutes, started_at, resolved_at, ai_explanation, context jsonb)
+-- No unique constraint; the cron jobs INSERT a fresh row on each detection tick
+-- while the condition holds active.
 ```
 
 ---
