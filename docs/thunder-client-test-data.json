@@ -1,0 +1,543 @@
+{
+  "info": {
+    "name": "Sanhok Ingestion API - Complete Test Suite",
+    "description": "Test data covering all event types (error, activity, trace) and edge cases",
+    "baseUrl": "https://sanhok.vercel.app/api/ingest",
+    "apiKey": "{{API_KEY}}"
+  },
+
+  "tests": [
+    {
+      "name": "1. Error Event - TypeError with Stack Trace",
+      "method": "POST",
+      "url": "{{baseUrl}}",
+      "headers": {
+        "Authorization": "Bearer {{apiKey}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "test-error-001",
+        "events": [
+          {
+            "type": "error",
+            "fingerprint": "TypeError-Cannot-read-properties-undefined-userId",
+            "title": "TypeError: Cannot read properties of undefined (reading 'userId')",
+            "message": "Cannot read properties of undefined (reading 'userId')",
+            "exception_type": "TypeError",
+            "environment": "production",
+            "user_id": "user-42",
+            "user_email": "bob@acme.example",
+            "request_url": "https://app.acme.com/api/orders",
+            "request_method": "GET",
+            "occurred_at": "2026-03-15T14:30:00Z",
+            "stack_trace": [
+              {
+                "file": "src/api/orders.ts",
+                "function": "getOrder",
+                "lineno": 87,
+                "colno": 12
+              },
+              {
+                "file": "src/middleware/auth.ts",
+                "function": "requireUser",
+                "lineno": 23,
+                "colno": 5
+              }
+            ],
+            "tags": {
+              "version": "2.4.1",
+              "region": "us-east-1"
+            }
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "2. Error Event - Database Connection Error",
+      "method": "POST",
+      "url": "{{baseUrl}}",
+      "headers": {
+        "Authorization": "Bearer {{apiKey}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "test-error-002",
+        "events": [
+          {
+            "type": "error",
+            "fingerprint": "DatabaseError-Connection-timeout",
+            "title": "DatabaseError: Connection timeout after 5000ms",
+            "message": "Connection timeout after 5000ms",
+            "exception_type": "DatabaseError",
+            "environment": "production",
+            "user_id": "user-123",
+            "request_url": "https://app.acme.com/api/products",
+            "request_method": "POST",
+            "occurred_at": "2026-03-15T14:35:00Z",
+            "stack_trace": [
+              {
+                "file": "node_modules/pg-pool/index.js",
+                "function": "connect",
+                "lineno": 142,
+                "colno": 18
+              },
+              {
+                "file": "src/lib/db.ts",
+                "function": "query",
+                "lineno": 56,
+                "colno": 22
+              }
+            ],
+            "tags": {
+              "version": "2.4.1",
+              "db_host": "db-primary-01"
+            },
+            "breadcrumbs": [
+              {
+                "timestamp": "2026-03-15T14:34:55Z",
+                "category": "http",
+                "message": "POST /api/products",
+                "level": "info"
+              },
+              {
+                "timestamp": "2026-03-15T14:34:56Z",
+                "category": "db",
+                "message": "Attempting connection to database",
+                "level": "debug"
+              }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "3. Error Event - Unhandled Promise Rejection",
+      "method": "POST",
+      "url": "{{baseUrl}}",
+      "headers": {
+        "Authorization": "Bearer {{apiKey}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "test-error-003",
+        "events": [
+          {
+            "type": "error",
+            "fingerprint": "UnhandledPromiseRejection-Failed-to-fetch-users",
+            "title": "Unhandled Promise Rejection: Failed to fetch /api/users",
+            "message": "Failed to fetch /api/users",
+            "exception_type": "UnhandledPromiseRejection",
+            "environment": "production",
+            "user_id": "user-789",
+            "user_email": "alice@acme.example",
+            "request_url": "https://app.acme.com/dashboard",
+            "request_method": "GET",
+            "occurred_at": "2026-03-15T14:40:00Z",
+            "stack_trace": [
+              {
+                "file": "src/components/UserList.tsx",
+                "function": "fetchUsers",
+                "lineno": 45,
+                "colno": 8
+              },
+              {
+                "file": "src/hooks/useUsers.ts",
+                "function": "useUsers",
+                "lineno": 18,
+                "colno": 15
+              }
+            ],
+            "tags": {
+              "version": "2.4.1",
+              "component": "UserList",
+              "release": "v2.4.1-prod.20260315"
+            }
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "4. Activity Event - Page View",
+      "method": "POST",
+      "url": "{{baseUrl}}",
+      "headers": {
+        "Authorization": "Bearer {{apiKey}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "test-activity-001",
+        "events": [
+          {
+            "type": "activity",
+            "session_id": "sess_abc123def456",
+            "anonymous_id": "anon_xyz789",
+            "event_type": "page_view",
+            "event_name": "viewed_pricing",
+            "url": "https://app.acme.com/pricing",
+            "referrer": "https://google.com",
+            "occurred_at": "2026-03-15T14:45:00Z",
+            "properties": {
+              "page_title": "Pricing - Acme Corp",
+              "plan_viewed": "professional"
+            }
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "5. Activity Event - Custom Event (Button Click)",
+      "method": "POST",
+      "url": "{{baseUrl}}",
+      "headers": {
+        "Authorization": "Bearer {{apiKey}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "test-activity-002",
+        "events": [
+          {
+            "type": "activity",
+            "session_id": "sess_abc123def456",
+            "anonymous_id": "anon_xyz789",
+            "event_type": "custom",
+            "event_name": "clicked_signup",
+            "url": "https://app.acme.com/pricing",
+            "occurred_at": "2026-03-15T14:46:00Z",
+            "properties": {
+              "button_text": "Start Free Trial",
+              "plan_selected": "professional",
+              "cta_position": "hero"
+            }
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "6. Activity Event - Identify (Anonymous to User)",
+      "method": "POST",
+      "url": "{{baseUrl}}",
+      "headers": {
+        "Authorization": "Bearer {{apiKey}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "test-activity-003",
+        "events": [
+          {
+            "type": "activity",
+            "session_id": "sess_abc123def456",
+            "anonymous_id": "anon_xyz789",
+            "user_id": "user-new-signup-001",
+            "event_type": "identify",
+            "event_name": "user_identified",
+            "url": "https://app.acme.com/signup/complete",
+            "occurred_at": "2026-03-15T14:47:00Z",
+            "properties": {
+              "email": "newuser@company.com",
+              "signup_method": "google_oauth"
+            }
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "7. Activity Event - Form Submission",
+      "method": "POST",
+      "url": "{{baseUrl}}",
+      "headers": {
+        "Authorization": "Bearer {{apiKey}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "test-activity-004",
+        "events": [
+          {
+            "type": "activity",
+            "session_id": "sess_abc123def456",
+            "anonymous_id": "anon_xyz789",
+            "user_id": "user-new-signup-001",
+            "event_type": "custom",
+            "event_name": "form_submitted",
+            "url": "https://app.acme.com/contact",
+            "occurred_at": "2026-03-15T14:50:00Z",
+            "properties": {
+              "form_name": "contact_sales",
+              "company_size": "50-200",
+              "industry": "saas"
+            }
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "8. Trace Event - HTTP Request",
+      "method": "POST",
+      "url": "{{baseUrl}}",
+      "headers": {
+        "Authorization": "Bearer {{apiKey}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "test-trace-001",
+        "events": [
+          {
+            "type": "trace",
+            "trace_id": "trace_http_001",
+            "span_id": "span_001",
+            "operation": "http.GET /api/products",
+            "duration_ms": 245.67,
+            "status": "ok",
+            "started_at": "2026-03-15T14:55:00.000Z",
+            "ended_at": "2026-03-15T14:55:00.245Z",
+            "tags": {
+              "http.method": "GET",
+              "http.url": "/api/products",
+              "http.status_code": 200
+            },
+            "resource_attributes": {
+              "service.name": "acme-api",
+              "service.version": "2.4.1"
+            }
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "9. Trace Event - Database Query",
+      "method": "POST",
+      "url": "{{baseUrl}}",
+      "headers": {
+        "Authorization": "Bearer {{apiKey}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "test-trace-002",
+        "events": [
+          {
+            "type": "trace",
+            "trace_id": "trace_http_001",
+            "span_id": "span_002",
+            "parent_span_id": "span_001",
+            "operation": "db.query.getProducts",
+            "duration_ms": 189.34,
+            "status": "ok",
+            "started_at": "2026-03-15T14:55:00.020Z",
+            "ended_at": "2026-03-15T14:55:00.209Z",
+            "tags": {
+              "db.system": "postgresql",
+              "db.statement": "SELECT * FROM products WHERE active = TRUE",
+              "db.name": "acme_prod"
+            }
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "10. Trace Event - Slow Database Query (>1s)",
+      "method": "POST",
+      "url": "{{baseUrl}}",
+      "headers": {
+        "Authorization": "Bearer {{apiKey}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "test-trace-003",
+        "events": [
+          {
+            "type": "trace",
+            "trace_id": "trace_slow_001",
+            "span_id": "span_slow_001",
+            "operation": "db.query.aggregateReports",
+            "duration_ms": 1847.23,
+            "status": "ok",
+            "started_at": "2026-03-15T15:00:00.000Z",
+            "ended_at": "2026-03-15T15:00:01.847Z",
+            "tags": {
+              "db.system": "postgresql",
+              "db.statement": "SELECT org_id, COUNT(*) ... GROUP BY ...",
+              "db.name": "acme_analytics",
+              "slow_query": true
+            }
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "11. Trace Event - Error Status",
+      "method": "POST",
+      "url": "{{baseUrl}}",
+      "headers": {
+        "Authorization": "Bearer {{apiKey}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "test-trace-004",
+        "events": [
+          {
+            "type": "trace",
+            "trace_id": "trace_error_001",
+            "span_id": "span_error_001",
+            "operation": "http.POST /api/orders",
+            "duration_ms": 52.18,
+            "status": "error",
+            "started_at": "2026-03-15T15:05:00.000Z",
+            "ended_at": "2026-03-15T15:05:00.052Z",
+            "tags": {
+              "http.method": "POST",
+              "http.url": "/api/orders",
+              "http.status_code": 500,
+              "error": true,
+              "error.message": "Validation failed: missing required field"
+            }
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "12. Multi-Event Batch (Error + Activity)",
+      "method": "POST",
+      "url": "{{baseUrl}}",
+      "headers": {
+        "Authorization": "Bearer {{apiKey}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "test-batch-001",
+        "events": [
+          {
+            "type": "error",
+            "fingerprint": "ValidationError-missing-field",
+            "title": "ValidationError: Missing required field 'email'",
+            "message": "Missing required field 'email'",
+            "exception_type": "ValidationError",
+            "environment": "production",
+            "request_url": "https://app.acme.com/api/users",
+            "request_method": "POST",
+            "occurred_at": "2026-03-15T15:10:00Z"
+          },
+          {
+            "type": "activity",
+            "session_id": "sess_batch_test",
+            "anonymous_id": "anon_batch_001",
+            "event_type": "custom",
+            "event_name": "form_error",
+            "url": "https://app.acme.com/signup",
+            "occurred_at": "2026-03-15T15:10:00Z",
+            "properties": {
+              "error_field": "email",
+              "form_name": "signup"
+            }
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "13. Idempotency Test (Retry Same Request)",
+      "method": "POST",
+      "url": "{{baseUrl}}",
+      "headers": {
+        "Authorization": "Bearer {{apiKey}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "test-idempotency-001",
+        "events": [
+          {
+            "type": "error",
+            "fingerprint": "TestError-Idempotency",
+            "title": "TestError: Idempotency check",
+            "message": "This should only be counted once even if sent multiple times",
+            "exception_type": "TestError",
+            "environment": "test",
+            "occurred_at": "2026-03-15T15:15:00Z"
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "14. Full User Journey (Page View → Click → Identify → Conversion)",
+      "method": "POST",
+      "url": "{{baseUrl}}",
+      "headers": {
+        "Authorization": "Bearer {{apiKey}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "test-journey-001",
+        "events": [
+          {
+            "type": "activity",
+            "session_id": "sess_journey_001",
+            "anonymous_id": "anon_journey_001",
+            "event_type": "page_view",
+            "event_name": "viewed_homepage",
+            "url": "https://app.acme.com",
+            "referrer": "https://twitter.com",
+            "occurred_at": "2026-03-15T15:20:00Z"
+          },
+          {
+            "type": "activity",
+            "session_id": "sess_journey_001",
+            "anonymous_id": "anon_journey_001",
+            "event_type": "page_view",
+            "event_name": "viewed_pricing",
+            "url": "https://app.acme.com/pricing",
+            "occurred_at": "2026-03-15T15:21:00Z"
+          },
+          {
+            "type": "activity",
+            "session_id": "sess_journey_001",
+            "anonymous_id": "anon_journey_001",
+            "event_type": "custom",
+            "event_name": "clicked_signup",
+            "url": "https://app.acme.com/pricing",
+            "occurred_at": "2026-03-15T15:22:00Z",
+            "properties": {
+              "plan": "professional"
+            }
+          },
+          {
+            "type": "activity",
+            "session_id": "sess_journey_001",
+            "anonymous_id": "anon_journey_001",
+            "user_id": "user_converted_001",
+            "event_type": "identify",
+            "event_name": "user_identified",
+            "url": "https://app.acme.com/signup/complete",
+            "occurred_at": "2026-03-15T15:23:00Z",
+            "properties": {
+              "email": "converted@customer.com"
+            }
+          },
+          {
+            "type": "activity",
+            "session_id": "sess_journey_001",
+            "anonymous_id": "anon_journey_001",
+            "user_id": "user_converted_001",
+            "event_type": "custom",
+            "event_name": "signup_completed",
+            "url": "https://app.acme.com/dashboard",
+            "occurred_at": "2026-03-15T15:24:00Z",
+            "properties": {
+              "plan": "professional",
+              "payment_method": "stripe"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

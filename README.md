@@ -26,6 +26,8 @@ cp .env.local.example .env.local
 #   supabase/migrations/003_rate_limit_fn.sql
 #   supabase/migrations/004_helper_functions.sql
 #   supabase/migrations/005_alert_trigger.sql   ← requires pg_net extension
+#   supabase/migrations/006_app_config.sql      ← config table for AI trigger
+#   supabase/migrations/007_queue_drain_function.sql  ← fixes unreliable 10s cron
 
 # Seed demo data (3 orgs, a detected anomaly with AI explanation,
 #                 a replayable user session, and latency degradation in trends)
@@ -43,12 +45,13 @@ npm run dev
 | bob@betalabs.example | `/beta-labs` | Minimal baseline data |
 | carol@gamma.example | `/gamma` | Minimal baseline data |
 
-For the AI trigger (anomaly explanation) to work, add two custom GUC settings in
-**Supabase → Database → Settings → Custom config**:
+**Note**: Migration 006 creates the `app_config` table with placeholder values. Update these in Supabase SQL Editor after deployment:
+```sql
+UPDATE app_config SET value = 'https://your-app.vercel.app' WHERE key = 'api_base_url';
+UPDATE app_config SET value = '<your_INTERNAL_API_SECRET>' WHERE key = 'internal_api_secret';
 ```
-app.api_base_url        = https://your-app.vercel.app
-app.internal_api_secret = <same value as INTERNAL_API_SECRET env var>
-```
+
+This enables the AI explanation trigger to work. See **Troubleshooting** section if alerts are created but `ai_explanation` stays NULL.
 
 ---
 
@@ -354,3 +357,147 @@ summarisation before ingestion reliability, and alerting UI before detection log
 | **Migration delivery** | Manual SQL execution in Supabase SQL editor | Supabase CLI `supabase db push` triggered on merge to main via CI/CD |
 | **Connection pooling** | Supabase PgBouncer transaction mode (correct default) | Increase pool size; add a read replica for dashboard queries to isolate analytics load from ingestion writes |
 | **Retroactive identity stitching at scale** | Inline `UPDATE sessions … WHERE anonymous_id = $1` in the drainer | Chunk updates with `LIMIT/OFFSET` for anonymous IDs with >1k associated sessions; or queue to a separate reconciliation job |
+
+---
+
+## Troubleshooting
+
+### AI Explanation Not Working (alerts.ai_explanation remains NULL)
+
+**Symptom**: Alerts are created but `ai_explanation` column stays `NULL`. No HTTP requests appear in `net.http_request_queue` or `net._http_response`.
+
+**Root cause**: The trigger function `fn_notify_alert_explanation()` reads configuration from `app_config` table, but Row-Level Security blocks access even inside `SECURITY DEFINER` functions.
+
+**Fix** (already applied in migration 006):
+
+1. Create a helper function that bypasses RLS:
+```sql
+CREATE OR REPLACE FUNCTION get_app_config(config_key text)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  config_value text;
+BEGIN
+  SELECT value INTO config_value FROM app_config WHERE key = config_key;
+  RETURN config_value;
+END;
+$$;
+```
+
+2. Add RLS policy to allow postgres role to read `app_config`:
+```sql
+CREATE POLICY "allow_postgres_read" ON app_config
+  FOR SELECT
+  TO postgres
+  USING (true);
+```
+
+3. Update the trigger function to use the helper:
+```sql
+CREATE OR REPLACE FUNCTION fn_notify_alert_explanation()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_api_base_url  text;
+  v_internal_key  text;
+BEGIN
+  v_api_base_url := get_app_config('api_base_url');
+  v_internal_key := get_app_config('internal_api_secret');
+
+  IF v_api_base_url IS NULL OR v_api_base_url = ''
+  OR v_internal_key IS NULL OR v_internal_key = '' OR v_internal_key = 'change_me'
+  THEN
+    RETURN NEW;
+  END IF;
+
+  PERFORM net.http_post(
+    url     := v_api_base_url || '/api/ai/explain-alert',
+    headers := jsonb_build_object(
+                 'Content-Type',   'application/json',
+                 'X-Internal-Key', v_internal_key
+               ),
+    body    := jsonb_build_object('alertId', NEW.id)::text,
+    timeout_milliseconds := 10000
+  );
+
+  RETURN NEW;
+EXCEPTION WHEN OTHERS THEN
+  RETURN NEW;
+END;
+$$;
+```
+
+4. Verify config is accessible:
+```sql
+SELECT get_app_config('api_base_url') as base_url, 
+       get_app_config('internal_api_secret') as secret;
+```
+
+If values return, insert a test alert to trigger the pipeline.
+
+---
+
+### Queue Drainer Not Processing Events (Stuck in ingestion_queue)
+
+**Symptom**: Events are accepted (200 OK) but never appear in `error_groups`, `sessions`, or `traces`. `/api/ingest` returns success but dashboard shows no data.
+
+**Root cause**: pg_cron with `'10 seconds'` interval is unreliable on Supabase hosted Postgres (free tier especially). Supabase doesn't guarantee sub-minute cron execution.
+
+**Fix** (migration 007):
+
+1. Extract drain logic into a reusable function:
+```sql
+CREATE OR REPLACE FUNCTION drain_ingestion_queue(batch_size int DEFAULT 500)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+-- (full function body in migration 007_queue_drain_function.sql)
+$$;
+```
+
+2. Update cron to run every minute (much more reliable):
+```sql
+SELECT cron.unschedule('drain-ingestion-queue');
+
+SELECT cron.schedule(
+    'drain-ingestion-queue',
+    '* * * * *',  -- Every minute instead of 10 seconds
+    $$ SELECT drain_ingestion_queue(500); $$
+);
+```
+
+3. Verify cron is active:
+```sql
+SELECT jobname, schedule, active 
+FROM cron.job 
+WHERE jobname = 'drain-ingestion-queue';
+```
+
+Should show `active = true` and `schedule = * * * * *`.
+
+4. Test manually:
+```sql
+SELECT drain_ingestion_queue(500);
+```
+
+Should return `{"processed": N, "failed": 0, "timestamp": "..."}`.
+
+---
+
+### Testing Ingestion End-to-End
+
+Use the Thunder Client test data in `docs/thunder-client-test-data.json` covering all event types:
+
+- **Error events** with stack traces, breadcrumbs, user context
+- **Activity events** including page views, custom events, identify calls
+- **Trace events** with parent-child relationships, slow queries
+- **Multi-event batches** and idempotency tests
+- **Full user journey** (anonymous → page view → click → identify → conversion)
+
+Import into Thunder Client and run against `https://sanhok.vercel.app/api/ingest` with your API key.

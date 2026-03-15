@@ -72,18 +72,27 @@ export async function POST(request: NextRequest) {
   const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'
   const inviteUrl = `${siteUrl}/accept-invitation?token=${rawToken}`
 
-  // Supabase invite emails use implicit flow — access_token lands in the URL hash.
-  // We point redirectTo directly at the accept page; the client-side code there
-  // reads the hash and calls setSession() before the user clicks "Accept".
-  const callbackUrl = `${siteUrl}/accept-invitation?token=${rawToken}`
-
-  const { error: emailError } = await serviceClient.auth.admin.inviteUserByEmail(
-    email.toLowerCase(),
-    { redirectTo: callbackUrl }
+  // Check if user already has an account — inviteUserByEmail only works for new users.
+  // Existing users can use the invite URL directly (they'll be prompted to log in if needed).
+  const { data: existingAuthUsers } = await serviceClient.auth.admin.listUsers({ perPage: 1000 })
+  const userAlreadyExists = existingAuthUsers?.users.some(
+    (u) => u.email?.toLowerCase() === email.toLowerCase()
   )
 
-  if (emailError) {
-    console.error('[Invitation] Email send failed:', emailError.message, JSON.stringify(emailError))
+  let emailError: { message: string } | null = null
+
+  if (!userAlreadyExists) {
+    const callbackUrl = `${siteUrl}/accept-invitation?token=${rawToken}`
+    const { error } = await serviceClient.auth.admin.inviteUserByEmail(
+      email.toLowerCase(),
+      { redirectTo: callbackUrl }
+    )
+    emailError = error
+    if (emailError) {
+      console.error('[Invitation] Email send failed:', emailError.message)
+    }
+  } else {
+    console.log(`[Invitation] ${email} already has an account — skipping inviteUserByEmail`)
   }
 
   console.log(`[Invitation] ${email} → ${inviteUrl}`)

@@ -40,8 +40,13 @@ function AcceptInvitationContent() {
 
     // Normal flow — user already has a session (came from login or PKCE callback)
     supabase.auth.getUser().then(({ data }) => {
-      setUser(data.user)
-      setStatus(data.user ? 'ready' : 'ready')
+      if (data.user) {
+        setUser(data.user)
+        setStatus('ready')
+      } else {
+        // Not logged in — send to login and come straight back with the token preserved
+        router.replace(`/login?redirectTo=${encodeURIComponent(`/accept-invitation?token=${token}`)}`)
+      }
     })
   }, [])
 

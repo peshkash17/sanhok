@@ -57,7 +57,7 @@ Client SDK
 │  • No fan-out, no synchronous processing            │
 └─────────────────────────────┬───────────────────────┘
                               │
-                 ┌────────────┘  pg_cron: every 10 seconds
+                 ┌────────────┘  pg_cron: every minute (*/1)
                  ▼
 ┌─────────────────────────────────────────────────────┐
 │  Queue Drainer (pg_cron job)                        │
@@ -71,12 +71,14 @@ Client SDK
 │  • Increment attempts on failure; dead-letter at 5 │
 └─────────────────────────────────────────────────────┘
                               │
-            ~10 seconds after ingest call
+            ~60 seconds after ingest call
                               ▼
                      Event is queryable
 ```
 
-**Typical end-to-end latency**: < 5 ms to acknowledge (caller unblocked). ~10 s to queryable (next cron tick). Maximum observed lag before alert: queue depth × batch_time.
+**Typical end-to-end latency**: < 5 ms to acknowledge (caller unblocked). ~60 s to queryable (next cron tick). Maximum observed lag before alert: queue depth × batch_time.
+
+**Note on cron interval**: Initial implementation used 10-second cron but was unreliable on Supabase free tier (pg_cron sub-minute intervals not guaranteed). Changed to 1-minute interval (`* * * * *`) for production reliability.
 
 ---
 
@@ -307,7 +309,7 @@ GET /api/errors/3f7a2b1c-…/occurrences
 - At target scale (thousands of events/minute per org), Postgres with `SKIP LOCKED` queues handles the load comfortably without the operational overhead.
 
 **Cost of the chosen approach (queue table + pg_cron)**:
-- Maximum queryable lag is ~10 seconds (one cron tick). Not suitable for use cases requiring sub-second event visibility.
+- Maximum queryable lag is ~60 seconds (one cron tick). Not suitable for use cases requiring sub-second event visibility. Initial 10-second interval was unreliable on hosted Postgres; 1-minute is the minimum reliable interval.
 - The queue table is stored in the same Postgres instance as the application data. A DB overload event affects both ingestion and reads simultaneously, rather than isolating them.
 - pg_cron has limited observability; drainer failures are logged to `cron.job_run_details` but do not surface alerts automatically. Requires explicit monitoring of queue depth.
 - Throughput ceiling: Postgres can handle ~5k–10k `INSERT`s per second per instance. A single high-volume org can saturate the queue table. Mitigation: per-org rate limiting (implemented) and Postgres connection pooling via PgBouncer (Supabase provides this by default).
@@ -758,7 +760,7 @@ CREATE TABLE alerts (
 
 ### Anomaly Explanation
 
-**Trigger**: After a row is inserted into `alerts`, a Supabase Database webhook (or pg_net HTTP call from pg_cron) fires an async request to a Next.js API route: `POST /api/ai/explain-alert`.
+**Trigger**: After a row is inserted into `alerts`, a Postgres trigger function (`fn_notify_alert_explanation`) uses `pg_net` to fire an async HTTP request to the AI service (Gemini 2.0 Flash). The trigger reads the API endpoint from an `app_config` table using a `SECURITY DEFINER` helper function (`get_app_config`) to bypass RLS, since triggers run with definer privileges but RLS policies still apply to tables with `FORCE ROW LEVEL SECURITY`. Without the helper function, the trigger would fail silently when trying to read config.
 
 **Context assembled**:
 ```typescript
